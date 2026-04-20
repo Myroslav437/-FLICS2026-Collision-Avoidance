@@ -23,7 +23,6 @@ The framework consists of three decoupled components:
 ```
 config/
   default_world.yaml        # World-generator parameters
-data/                       # Generated corpora (git-ignored)
 src/
   world_generator/          # Reproducible world generation
     models.py               # Geometric and kinematic data classes
@@ -43,6 +42,16 @@ src/
       avoidance/            #   VFH, DWA
       registry.py           # Name -> factory registry for all three
     core/                   # Main loop, metrics aggregator, telemetry sink
+  simulation_visualizer/    # Post-hoc telemetry playback
+    reader.py               # JSONL telemetry parser
+    panels/                 # One module per visualization panel
+      objective_world.py    #   True world state W_t
+      perception.py         #   Perceived world W_tilde_t
+      pipeline_output.py    #   Detection, fusion, avoidance outputs
+      metrics.py            #   Six per-run metrics (§IV-B)
+    layout.py               # 2×2 panel compositor
+    playback.py             # Animation timing + file rendering
+    __main__.py             # CLI driver
   visualization/
     world.py                # Static world rendering
 scripts/
@@ -64,6 +73,14 @@ Dependencies: `numpy`, `scipy`, `shapely`, `networkx`, `matplotlib`, `pyyaml`,
 
 ## Usage
 
+### Generate a single world (Default)
+
+```bash
+./venv/Scripts/python scripts/generate_worlds.py \
+    --config config/default_world.yaml \
+    --output data/sample_single
+```
+
 ### Generate a small flat corpus
 
 ```bash
@@ -77,16 +94,21 @@ Dependencies: `numpy`, `scipy`, `shapely`, `networkx`, `matplotlib`, `pyyaml`,
 
 ```bash
 ./venv/Scripts/python scripts/generate_worlds.py \
-    --config config/default_world.yaml \
-    --mode stratified --per-stratum 10 \
+    --mode stratified \
+    --strata-config config/default_strata.yaml \
+    --per-stratum 10 \
     --output data/corpus
 ```
 
-Stratification axes:
+By default, `--strata-config config/default_strata.yaml` is used. This dynamically generates a full cartesian product combining arrays of variables you declare matching the exact parameter dot-hierarchy.
+You can stratify *ANY* parameter from `config/default_world.yaml` using this method!
 
-- `d_bsp` in `{1, 2, 3}`
-- `n_static` in `{0, 4, 8, 16}`
-- `n_dynamic` in `{0, 2, 4, 8}`
+For example, a custom `my_strata.yaml` might look like:
+```yaml
+environment.bsp_depth: [1, 2]
+obstacles.n_dynamic: [0, 2]
+path.prm_samples: [500, 1000]
+```
 
 #### BSP depth semantics (`d_bsp`)
 
@@ -161,19 +183,20 @@ obstacle counts, path length, generation time).
 
 ### Run a simulation
 
-```python
-from world_generator import Omega, generate_world
-from simulation_engine import run_simulation, NOMINAL
+```bash
+# Load an existing world from JSON:
+./venv/Scripts/python scripts/run_simulation.py \
+    --world data/validation_v5/world_00000.json \
+    --sigma nominal \
+    --detection EC --fusion PT --avoidance VFH \
+    --telemetry data/run_example.jsonl
 
-omega = Omega.load("config/default_world.yaml")
-world = generate_world(omega, world_id=0, seed=0)
-
-metrics = run_simulation(
-    world, sigma=NOMINAL,
-    detection="EC", fusion="KF", avoidance="VFH",
-    seed=42,
-)
-print(metrics.to_dict())
+# Generate a new world from scratch on the fly:
+./venv/Scripts/python scripts/run_simulation.py \
+    --config config/default_world.yaml \
+    --sigma degraded-1 \
+    --detection DB --fusion KF --avoidance DWA \
+    --telemetry data/run_example.jsonl
 ```
 
 Available stage names (all combinations supported):
@@ -185,6 +208,77 @@ Available stage names (all combinations supported):
 Available `Sigma` presets: `NOMINAL`, `DEGRADED_1`, `DEGRADED_2`
 (plus name-based lookup via `get_sigma("degraded-1")`).
 
+### Visualize a simulation run
+
+The Simulation Visualizer plays back JSONL telemetry files produced by the
+engine. It renders four panels (objective world, perception, pipeline output,
+metrics) as a matplotlib animation.
+
+```bash
+# First, run a simulation with telemetry capture using the CLI runner
+./venv/Scripts/python scripts/run_simulation.py \
+    --config config/default_world.yaml \
+    --sigma nominal \
+    --detection EC --fusion KF --avoidance VFH \
+    --seed 42 \
+    --telemetry data/run_example.jsonl
+
+# Play back at wall-clock speed (live window)
+./venv/Scripts/python -m src.simulation_visualizer play \
+    --telemetry data/run_example.jsonl --speed 1.0
+
+# Play at 2× speed
+./venv/Scripts/python -m src.simulation_visualizer play \
+    --telemetry data/run_example.jsonl --speed 2.0
+
+# Step-through on keypress (space bar)
+./venv/Scripts/python -m src.simulation_visualizer play \
+    --telemetry data/run_example.jsonl --speed 0
+
+# Render to a directory of PNGs
+./venv/Scripts/python -m src.simulation_visualizer play \
+    --telemetry data/run_example.jsonl --render-to data/frames/ --dpi 150
+
+# Render to MP4 (requires ffmpeg on PATH)
+./venv/Scripts/python -m src.simulation_visualizer play \
+    --telemetry data/run_example.jsonl --render-to data/run.mp4
+
+# Render to GIF (requires Pillow)
+./venv/Scripts/python -m src.simulation_visualizer play \
+    --telemetry data/run_example.jsonl --render-to data/run.gif
+```
+
+#### Panel layout
+
+```
++---------------------+---------------------+
+|  Objective World    |  Perception (W̃_t)   |
+|  (true W_t)         |  (prior map M_0,    |
+|                     |   distorted LiDAR)  |
++---------------------+---------------------+
+|  Pipeline Output    |  Metrics (§IV-B)    |
+|  (detections, fused |  (μ_col, μ_dev,     |
+|   tracks, control)  |   μ_goal, μ_vel,    |
+|                     |   μ_comp, μ_lat)    |
++---------------------+---------------------+
+```
+
+- **Objective World**: Ground-truth W_t — walls, reference path π,
+  obstacles at current positions, AGV footprint.
+- **Perception**: W̃_t from Eq. (12) — prior map M_0 (dashed lines),
+  distorted LiDAR scan hits (blue dots), AGV pose.
+- **Pipeline Output**: Detections Ô_t (orange ×), fused tracks Ō_t
+  (red circles + velocity arrows), control action (green arrow).
+- **Metrics**: Running accumulation of six §IV-B metrics; final values
+  shown in bold at run end.
+
+#### Adding a new panel
+
+1. Create `src/simulation_visualizer/panels/my_panel.py`.
+2. Subclass `Panel` (from `panels.base`).
+3. Implement `setup(ax, header)` and `update(step, step_index, total_steps)`.
+4. Register it in `panels/__init__.py`.
+5. Add an axis cell in `layout.py`.
 ### Run the test suite
 
 ```bash
@@ -210,6 +304,48 @@ Run `scripts/validate_corpus.py` against the manifest:
 ./venv/Scripts/python scripts/validate_corpus.py \
     --manifest data/corpus/manifest.csv \
     --config config/default_world.yaml
+```
+
+## Adding Custom Pipeline Algorithms
+
+The Simulation Engine architecture is pluggable. It resolves pipeline stages using dynamically registered factory functions rather than hardcoded logic. You can easily add and experiment with your own algorithms for any of the three stages (Detection, Fusion, Avoidance).
+
+### 1. Subclass the relevant interface
+Subclass `DetectionStage`, `FusionStage`, or `AvoidanceStage` from `src.simulation_engine.stages.base`.
+
+```python
+# src/simulation_engine/stages/detection/my_detector.py
+import numpy as np
+from src.simulation_engine.stages.base import DetectionStage
+from src.simulation_engine.types import LiDARScan, DetectedObstacle
+
+class MyDetector(DetectionStage):
+    name = "MY-DET"
+
+    def process(self, scan: LiDARScan) -> list[DetectedObstacle]:
+        # Your custom detection algorithm logic here
+        return []
+```
+
+### 2. Register your algorithm
+Bind your class into the engine's registry.
+
+```python
+# Typically done where your stages are initialized, or right under the class definition
+from src.simulation_engine.stages.registry import register_detection
+
+register_detection("MY-DET", MyDetector)
+```
+
+### 3. Run the simulation
+You can now pass your custom string identifier natively through the simulation tools!
+
+```bash
+./venv/Scripts/python scripts/run_simulation.py \
+    --world data/validation_v5/world_00000.json \
+    --sigma nominal \
+    --detection MY-DET --fusion PT --avoidance VFH \
+    --telemetry my_custom_test.jsonl
 ```
 
 ## Authors

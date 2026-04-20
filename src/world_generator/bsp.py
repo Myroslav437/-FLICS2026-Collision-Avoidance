@@ -26,12 +26,6 @@ Depth semantics (low values 1-2 yield open layouts):
 
 Internally the recursion takes an effective max depth of (d_bsp - 1) so
 that the recursion tree at d_bsp = k has at most k levels of rooms.
-
-Room padding p_room controls how far inside each leaf the inner room sits;
-low padding yields rooms that nearly fill their partitions (thin corridors),
-high padding yields small rooms surrounded by wide corridors. The
-environment structure E is the set of closed polygonal chains bounding
-the occupied (wall) geometry.
 """
 
 from __future__ import annotations

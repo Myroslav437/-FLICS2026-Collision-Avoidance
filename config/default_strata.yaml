@@ -1,0 +1,6 @@
+# Default 48-stratum grid for collision avoidance simulations
+# The keys must match the exact parameter dot-hierarchy defined in default_world.yaml
+
+environment.bsp_depth: [1, 2, 3]
+obstacles.n_static: [0, 4, 8, 16]
+obstacles.n_dynamic: [0, 2, 4, 8]

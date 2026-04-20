@@ -16,14 +16,15 @@ Each world is saved as JSON alongside its computed metrics; a manifest
 CSV summarises the corpus.
 """
 
-from __future__ import annotations
-
 import argparse
 import csv
+import itertools
+import json
 import os
 import sys
 import time
 import traceback
+import yaml
 from dataclasses import replace
 
 # Add project root to sys.path so the src package is importable.
@@ -34,24 +35,33 @@ from src.world_generator.metrics import compute_metrics  # noqa: E402
 from src.world_generator.prm import PRMGenerationError  # noqa: E402
 
 
-# Stratification axes (d_bsp >= 1 means at least one carved room; see
-# src/world_generator/bsp.py).
-STRATUM_D_BSP = (1, 2, 3)
-STRATUM_N_STATIC = (0, 4, 8, 16)
-STRATUM_N_DYNAMIC = (0, 2, 4, 8)
+def _build_strata(base: Omega, strata_dict: dict):
+    """Yield (stratum_id, omega, combination_dict) tuples for the corpus."""
+    if not strata_dict:
+        yield 0, base, {}
+        return
 
+    keys = list(strata_dict.keys())
+    values = [strata_dict[k] for k in keys]
 
-def _build_strata(base: Omega):
-    """Yield (stratum_id, omega) tuples for the 48-stratum corpus."""
     stratum_id = 0
-    for d in STRATUM_D_BSP:
-        for ns in STRATUM_N_STATIC:
-            for nd in STRATUM_N_DYNAMIC:
-                env = replace(base.env, bsp_depth=d)
-                obs = replace(base.obs, n_static=ns, n_dynamic=nd)
-                omega = Omega(env=env, agv=base.agv, path=base.path, obs=obs)
-                yield stratum_id, omega, d, ns, nd
-                stratum_id += 1
+    for combination in itertools.product(*values):
+        combination_dict = {k: v for k, v in zip(keys, combination)}
+
+        # Group updates by category
+        updates = {"environment": {}, "agv": {}, "path": {}, "obstacles": {}}
+        for k, v in combination_dict.items():
+            category, attr = k.split('.', 1)
+            updates[category][attr] = v
+
+        new_env = replace(base.env, **updates["environment"]) if updates["environment"] else base.env
+        new_agv = replace(base.agv, **updates["agv"]) if updates["agv"] else base.agv
+        new_path = replace(base.path, **updates["path"]) if updates["path"] else base.path
+        new_obs = replace(base.obs, **updates["obstacles"]) if updates["obstacles"] else base.obs
+
+        omega = Omega(env=new_env, agv=new_agv, path=new_path, obs=new_obs)
+        yield stratum_id, omega, combination_dict
+        stratum_id += 1
 
 
 def _generate_one(omega: Omega, seed: int, world_id: int):
@@ -65,14 +75,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="config/default_world.yaml",
                         help="Omega YAML (base parameter set)")
+    parser.add_argument("--strata-config", default="config/default_strata.yaml",
+                        help="YAML file defining the parameter arrays to stratify over")
     parser.add_argument("--output", required=True,
                         help="Output directory")
-    parser.add_argument("--mode", choices=("flat", "stratified"), default="flat")
+    parser.add_argument("--mode", choices=("single", "flat", "stratified"), default="single",
+                        help="Generation mode (single = flat with count 1)")
     parser.add_argument("--count", type=int, default=10,
                         help="Worlds to generate in flat mode")
     parser.add_argument("--per-stratum", type=int, default=2,
                         help="Worlds per stratum in stratified mode")
-    parser.add_argument("--seed-base", type=int, default=0,
+    parser.add_argument("--seed-base", type=int, default=1000,
                         help="Seed offset (s_wg = seed_base + i)")
     parser.add_argument("--max-retries", type=int, default=3,
                         help="Retry budget per world on PRM/placement failure")
@@ -83,40 +96,50 @@ def main() -> int:
 
     manifest_path = os.path.join(args.output, "manifest.csv")
     jobs = []
+    
+    if args.mode == "single":
+        args.mode = "flat"
+        args.count = 1
+
+    strata_dict = {}
+    if args.mode == "stratified":
+        with open(args.strata_config, "r", encoding="utf-8") as f:
+            strata_dict = yaml.safe_load(f)
+
     if args.mode == "flat":
         for i in range(args.count):
             jobs.append({
                 "stratum": 0,
-                "d_bsp": base.env.bsp_depth,
-                "n_static": base.obs.n_static,
-                "n_dynamic": base.obs.n_dynamic,
                 "omega": base,
+                "stratum_params": {},
                 "seed": args.seed_base + i,
                 "world_id": i,
             })
     else:
         world_id = 0
-        for stratum_id, omega, d, ns, nd in _build_strata(base):
+        for stratum_id, omega, combination_dict in _build_strata(base, strata_dict):
             for k in range(args.per_stratum):
                 jobs.append({
                     "stratum": stratum_id,
-                    "d_bsp": d,
-                    "n_static": ns,
-                    "n_dynamic": nd,
                     "omega": omega,
+                    "stratum_params": combination_dict,
                     "seed": args.seed_base + world_id,
                     "world_id": world_id,
                 })
                 world_id += 1
 
+    # Base fieldnames
     fieldnames = [
-        "world_id", "stratum", "d_bsp", "n_static", "n_dynamic",
-        "seed", "free_space_ratio", "min_passage_width",
+        "world_id", "stratum", "seed",
+        "d_bsp", "n_static", "n_dynamic",
+        "stratum_config",
+        "free_space_ratio", "min_passage_width",
         "min_corridor_width",
         "static_obstacle_count", "dynamic_obstacle_count",
         "path_length", "prm_reference_attempts",
         "gen_time_sec", "status",
     ]
+    
     n_ok = n_fail = 0
     with open(manifest_path, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
@@ -125,10 +148,11 @@ def main() -> int:
             row = {
                 "world_id": job["world_id"],
                 "stratum": job["stratum"],
-                "d_bsp": job["d_bsp"],
-                "n_static": job["n_static"],
-                "n_dynamic": job["n_dynamic"],
                 "seed": job["seed"],
+                "d_bsp": job["omega"].env.bsp_depth,
+                "n_static": job["omega"].obs.n_static,
+                "n_dynamic": job["omega"].obs.n_dynamic,
+                "stratum_config": json.dumps(job["stratum_params"]),
             }
             attempt = 0
             while True:

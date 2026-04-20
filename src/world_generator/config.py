@@ -4,16 +4,6 @@ Parameter dataclasses for Omega = <Omega_env, Omega_agv, Omega_path, Omega_obs>.
 Each dataclass mirrors one subset of the world generator's parameter
 set, with attribute names matching the symbols used in the canonical
 spec as closely as a Python identifier allows.
-
-Single source of truth
-----------------------
-Default values live exclusively in ``config/default_world.yaml`` and
-are loaded via ``Omega.load()``. No field on the dataclasses below
-carries a default - every field is required, so forgetting to populate
-one raises TypeError rather than silently substituting a value that
-could disagree with the spec. Scripts, tests, and visualisation code
-consume parameters through the loaded Omega; they do not re-declare
-numerical defaults.
 """
 
 from __future__ import annotations
@@ -38,10 +28,7 @@ class EnvironmentParams:
       min_partition   : (s_min_w, s_min_h), smallest leaf-partition dims
       split_ratio     : [rho_min, rho_max], split-ratio range
       room_padding    : [p_min, p_max], room padding range
-      min_corridor    : c_min, minimum corridor width between adjacent
-                        boundary elements (room walls and partition walls).
-                        Hard floor; overrides room_padding when the
-                        padding-implied corridor would be narrower.
+      min_corridor    : c_min, minimum corridor width between adjacent boundaries (room walls and partition walls).
       passage_width   : w_pass, corridor / passage width
       wall_thickness  : t_wall, wall thickness
     """

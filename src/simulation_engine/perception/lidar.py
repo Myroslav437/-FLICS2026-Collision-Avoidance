@@ -121,7 +121,7 @@ def _first_ray_hit(
     denom_safe = np.where(parallel, 1.0, denom)
 
     t = (v[:, 1] * (-w[:, 0]) - v[:, 0] * (-w[:, 1])) / denom_safe
-    u = (d[0] * (-w[:, 1]) - d[1] * (-w[:, 0])) / denom_safe
+    u = (d[0] * w[:, 1] - d[1] * w[:, 0]) / denom_safe
 
     valid = (~parallel) & (t >= r_min) & (t <= r_max) & (u >= 0.0) & (u <= 1.0)
     if not np.any(valid):
