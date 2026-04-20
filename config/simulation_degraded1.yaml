@@ -1,0 +1,20 @@
+name: "degraded-1"
+lidar:
+  geometry:
+    r_min: 0.05
+    r_max: 5.0
+    theta_fov: 4.71238898038469  # 270 degrees in radians
+    delta_theta: 0.017453292519943295  # 1.0 degrees in radians
+    f_scan: 15.0
+  distortion:
+    sigma_r: 0.02
+    p_miss: 0.02
+    p_ghost: 0.01
+perception:
+  eta_cpl: 0.9
+  sigma_map: 0.05
+dynamics:
+  v_agv_max: 1.5
+  a_agv_max: 1.0
+  omega_agv_max: 1.0
+  T_horizon: 120.0

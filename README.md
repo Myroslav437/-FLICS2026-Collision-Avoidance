@@ -78,6 +78,7 @@ Dependencies: `numpy`, `scipy`, `shapely`, `networkx`, `matplotlib`, `pyyaml`,
 ```bash
 ./venv/Scripts/python scripts/generate_worlds.py \
     --config config/default_world.yaml \
+    --seed 42 \
     --output data/sample_single
 ```
 
@@ -184,18 +185,10 @@ obstacle counts, path length, generation time).
 ### Run a simulation
 
 ```bash
-# Load an existing world from JSON:
 ./venv/Scripts/python scripts/run_simulation.py \
     --world data/validation_v5/world_00000.json \
-    --sigma nominal \
+    --config config/simulation_nominal.yaml \
     --detection EC --fusion PT --avoidance VFH \
-    --telemetry data/run_example.jsonl
-
-# Generate a new world from scratch on the fly:
-./venv/Scripts/python scripts/run_simulation.py \
-    --config config/default_world.yaml \
-    --sigma degraded-1 \
-    --detection DB --fusion KF --avoidance DWA \
     --telemetry data/run_example.jsonl
 ```
 
@@ -205,8 +198,12 @@ Available stage names (all combinations supported):
 - **Fusion:** `PT` (pass-through), `KF` (Kalman filter + Hungarian tracker)
 - **Avoidance:** `VFH` (Vector Field Histogram), `DWA` (Dynamic Window)
 
-Available `Sigma` presets: `NOMINAL`, `DEGRADED_1`, `DEGRADED_2`
-(plus name-based lookup via `get_sigma("degraded-1")`).
+### Simulation Configuration (`--config`)
+
+Three physical configurations are provided natively modeling the degradation constraints found in the publication:
+1. `config/simulation_nominal.yaml`
+2. `config/simulation_degraded1.yaml`
+3. `config/simulation_degraded2.yaml`
 
 ### Visualize a simulation run
 
@@ -217,8 +214,8 @@ metrics) as a matplotlib animation.
 ```bash
 # First, run a simulation with telemetry capture using the CLI runner
 ./venv/Scripts/python scripts/run_simulation.py \
-    --config config/default_world.yaml \
-    --sigma nominal \
+    --world data/sample/world_00000.json \
+    --config config/simulation_nominal.yaml \
     --detection EC --fusion KF --avoidance VFH \
     --seed 42 \
     --telemetry data/run_example.jsonl
@@ -343,7 +340,7 @@ You can now pass your custom string identifier natively through the simulation t
 ```bash
 ./venv/Scripts/python scripts/run_simulation.py \
     --world data/validation_v5/world_00000.json \
-    --sigma nominal \
+    --config config/simulation_nominal.yaml \
     --detection MY-DET --fusion PT --avoidance VFH \
     --telemetry my_custom_test.jsonl
 ```

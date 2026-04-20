@@ -75,21 +75,42 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="config/default_world.yaml",
                         help="Omega YAML (base parameter set)")
-    parser.add_argument("--strata-config", default="config/default_strata.yaml",
-                        help="YAML file defining the parameter arrays to stratify over")
     parser.add_argument("--output", required=True,
                         help="Output directory")
     parser.add_argument("--mode", choices=("single", "flat", "stratified"), default="single",
                         help="Generation mode (single = flat with count 1)")
-    parser.add_argument("--count", type=int, default=10,
-                        help="Worlds to generate in flat mode")
-    parser.add_argument("--per-stratum", type=int, default=2,
-                        help="Worlds per stratum in stratified mode")
+    parser.add_argument("--strata-config", type=str,
+                        help="[stratified] YAML file defining the parameter arrays")
+    parser.add_argument("--count", type=int,
+                        help="[flat] Worlds to generate in flat mode")
+    parser.add_argument("--per-stratum", type=int,
+                        help="[stratified] Worlds per stratum in stratified mode")
+    parser.add_argument("--seed", type=int,
+                        help="[single] Explicit random seed for the single world")
     parser.add_argument("--seed-base", type=int, default=1000,
-                        help="Seed offset (s_wg = seed_base + i)")
+                        help="[flat/stratified] Seed offset (s_wg = seed_base + i)")
     parser.add_argument("--max-retries", type=int, default=3,
                         help="Retry budget per world on PRM/placement failure")
     args = parser.parse_args()
+
+    # CLI cross-validation
+    if args.mode == "single":
+        if any(x is not None for x in (args.count, args.strata_config, args.per_stratum)):
+            parser.error('--count, --strata-config, and --per-stratum cannot be used with mode "single"')
+    elif args.mode == "flat":
+        if args.seed is not None:
+            parser.error('--seed can only be used with mode "single". Use --seed-base instead.')
+        if args.count is None:
+            parser.error('--count is required when mode is "flat"')
+        if args.strata_config is not None or args.per_stratum is not None:
+            parser.error('--strata-config and --per-stratum cannot be used with mode "flat"')
+    elif args.mode == "stratified":
+        if args.seed is not None:
+            parser.error('--seed can only be used with mode "single". Use --seed-base instead.')
+        if args.strata_config is None or args.per_stratum is None:
+            parser.error('--strata-config and --per-stratum are required when mode is "stratified"')
+        if args.count is not None:
+            parser.error('--count cannot be used with mode "stratified"')
 
     base = Omega.load(args.config)
     os.makedirs(args.output, exist_ok=True)
@@ -100,6 +121,8 @@ def main() -> int:
     if args.mode == "single":
         args.mode = "flat"
         args.count = 1
+        if args.seed is not None:
+            args.seed_base = args.seed
 
     strata_dict = {}
     if args.mode == "stratified":

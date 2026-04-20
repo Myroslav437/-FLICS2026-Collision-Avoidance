@@ -13,7 +13,7 @@ requires all values, so accidental omissions fail loudly.
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from typing import Mapping
+import yaml
 
 import math
 
@@ -163,84 +163,20 @@ class SimulationConfig:
             "dynamics": asdict(self.dynamics),
         }
 
-
-# =============================================================================
-# The three canonical configurations
-# =============================================================================
-
-_DEG = math.pi / 180.0
-
-
-NOMINAL = SimulationConfig(
-    name="nominal",
-    lidar=LiDARParams(
-        geometry=LiDARGeometry(
-            r_min=0.05, r_max=10.0,
-            theta_fov=270.0 * _DEG, delta_theta=0.5 * _DEG,
-            f_scan=15.0,
-        ),
-        distortion=LiDARDistortion(sigma_r=0.0, p_miss=0.0, p_ghost=0.0),
-    ),
-    perception=PerceptionParams(eta_cpl=1.0, sigma_map=0.0),
-    dynamics=DynamicsParams(
-        v_agv_max=1.5, a_agv_max=1.0, omega_agv_max=1.0, T_horizon=120.0
-    ),
-)
-
-DEGRADED_1 = SimulationConfig(
-    name="degraded-1",
-    lidar=LiDARParams(
-        geometry=LiDARGeometry(
-            r_min=0.05, r_max=5.0,
-            theta_fov=270.0 * _DEG, delta_theta=1.0 * _DEG,
-            f_scan=15.0,
-        ),
-        distortion=LiDARDistortion(sigma_r=0.02, p_miss=0.02, p_ghost=0.01),
-    ),
-    perception=PerceptionParams(eta_cpl=0.9, sigma_map=0.05),
-    dynamics=DynamicsParams(
-        v_agv_max=1.5, a_agv_max=1.0, omega_agv_max=1.0, T_horizon=120.0
-    ),
-)
-
-DEGRADED_2 = SimulationConfig(
-    name="degraded-2",
-    lidar=LiDARParams(
-        geometry=LiDARGeometry(
-            r_min=0.05, r_max=5.0,
-            theta_fov=180.0 * _DEG, delta_theta=2.0 * _DEG,
-            f_scan=10.0,
-        ),
-        distortion=LiDARDistortion(sigma_r=0.05, p_miss=0.05, p_ghost=0.02),
-    ),
-    perception=PerceptionParams(eta_cpl=0.7, sigma_map=0.1),
-    dynamics=DynamicsParams(
-        v_agv_max=1.5, a_agv_max=1.0, omega_agv_max=1.0, T_horizon=120.0
-    ),
-)
-
-
-_SIGMA_REGISTRY: Mapping[str, SimulationConfig] = {
-    "nominal": NOMINAL,
-    "degraded-1": DEGRADED_1,
-    "degraded-2": DEGRADED_2,
-    # Aliases the CLI commonly sees
-    "deg1": DEGRADED_1,
-    "deg2": DEGRADED_2,
-}
-
-
-def get_sigma(name: str) -> SimulationConfig:
-    """Look up a canonical configuration by name (case-insensitive)."""
-    key = name.strip().lower()
-    if key not in _SIGMA_REGISTRY:
-        known = ", ".join(sorted({k for k in _SIGMA_REGISTRY}))
-        raise KeyError(
-            f"unknown simulation configuration '{name}'; known: {known}"
+    @classmethod
+    def from_dict(cls, data: dict) -> "SimulationConfig":
+        return cls(
+            name=data["name"],
+            lidar=LiDARParams(
+                geometry=LiDARGeometry(**data["lidar"]["geometry"]),
+                distortion=LiDARDistortion(**data["lidar"]["distortion"]),
+            ),
+            perception=PerceptionParams(**data["perception"]),
+            dynamics=DynamicsParams(**data["dynamics"]),
         )
-    return _SIGMA_REGISTRY[key]
 
-
-def list_sigmas() -> list:
-    """List the canonical Sigma configuration names (no aliases)."""
-    return ["nominal", "degraded-1", "degraded-2"]
+    @classmethod
+    def load(cls, path: str) -> "SimulationConfig":
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        return cls.from_dict(data)

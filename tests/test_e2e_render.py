@@ -26,7 +26,7 @@ def telemetry_file(tmp_path):
     Uses a small world from the validation set to keep the test fast.
     """
     from src.world_generator import Omega, generate_world
-    from src.simulation_engine import NOMINAL, run_simulation
+    from src.simulation_engine import SimulationConfig, run_simulation
     from src.simulation_engine.core.telemetry import JsonlSink
 
     # Generate a simple world
@@ -38,12 +38,20 @@ def telemetry_file(tmp_path):
     )
     world = generate_world(omega, world_id=0, seed=0)
 
+    # Load Sigma YAML
+    sigma_nominal = SimulationConfig.load(
+        os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "config", "simulation_nominal.yaml",
+        )
+    )
+
     # Run simulation with telemetry
     telemetry_path = str(tmp_path / "test_run.jsonl")
     sink = JsonlSink(path=telemetry_path)
 
     run_simulation(
-        world, sigma=NOMINAL,
+        world, sigma=sigma_nominal,
         detection="EC", fusion="PT", avoidance="VFH",
         seed=42,
         telemetry_sink=sink,

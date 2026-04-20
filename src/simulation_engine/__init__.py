@@ -13,17 +13,12 @@ package is organised as:
 """
 
 from .config import (
-    DEGRADED_1,
-    DEGRADED_2,
-    NOMINAL,
     DynamicsParams,
     LiDARDistortion,
     LiDARGeometry,
     LiDARParams,
     PerceptionParams,
     SimulationConfig,
-    get_sigma,
-    list_sigmas,
 )
 from .core import SimulationEngine, run_simulation
 from .types import (
@@ -41,8 +36,6 @@ from .types import (
 __all__ = [
     "AGVState",
     "ControlAction",
-    "DEGRADED_1",
-    "DEGRADED_2",
     "DetectedObstacle",
     "DynamicsParams",
     "FusedObstacle",
@@ -50,7 +43,6 @@ __all__ = [
     "LiDARGeometry",
     "LiDARParams",
     "LiDARScan",
-    "NOMINAL",
     "PerceivedWorld",
     "PerceptionParams",
     "PriorMap",
@@ -58,7 +50,5 @@ __all__ = [
     "SimulationConfig",
     "SimulationEngine",
     "StepTelemetry",
-    "get_sigma",
-    "list_sigmas",
     "run_simulation",
 ]
