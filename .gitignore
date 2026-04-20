@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+
+# Virtual environment
+venv/
+.env/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Generated data (worlds, telemetry, figures)
+data/
+*.jsonl
+
+# Manuscript sources (tracked separately)
+paper/
+
+# OS
+.DS_Store
+Thumbs.db

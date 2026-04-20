@@ -1,0 +1,71 @@
+# =============================================================================
+# Default world-generator parameters Omega = <Omega_env, Omega_agv,
+# Omega_path, Omega_obs>  (paper Eq. 17, §III-B Table I).
+#
+# THIS FILE IS THE SINGLE SOURCE OF TRUTH for Table I default values.
+# Every consumer (dataclasses in src/world_generator/config.py, scripts,
+# tests, the visualizer) loads its parameters through Omega.load() against
+# this YAML. No magic numbers duplicating Table I values should appear in
+# any other file.
+# =============================================================================
+# scripts/generate_worlds.py stratifies the corpus by overriding d_bsp,
+# n_static, n_dynamic per stratum.
+
+# --- Omega_env: environment parameters (paper §III-B.1, Table I) ---
+environment:
+  X: 30.0               # X, Y domain size (m)
+  Y: 30.0
+  bsp_depth: 1          # d_bsp; stratified across {1, 2, 3} in the corpus.
+                        # d_bsp=0 is also supported (empty bounded hall,
+                        # outer perimeter only); see src/world_generator/bsp.py
+                        # for the depth semantics.
+  min_partition:        # (s_min_w, s_min_h) per Table I
+    - 6.0
+    - 6.0
+  split_ratio:          # [rho_min, rho_max]
+    - 0.3
+    - 0.7
+  room_padding:         # [p_min, p_max]
+    - 0.15
+    - 0.35
+  min_corridor: 2.0     # c_min (m); hard floor on corridor width between
+                        # room walls and partition walls, overriding p_room
+                        # when padding * partition_size would be narrower.
+  passage_width: 4.0    # w_pass (m)
+  wall_thickness: 0.3   # t_wall (m)
+
+# --- Omega_agv: AGV body dimensions (paper §III-B.2) ---
+agv:
+  L_agv: 0.6            # body length (m)
+  W_agv: 0.4            # body width (m)
+
+# --- Omega_path: PRM parameters for the reference path pi (paper §III-B.3) ---
+path:
+  prm_samples: 500      # n_samples
+  prm_neighbors: 10     # k_nn
+  max_edge_length: 5.0  # l_max (m)
+  clearance: 0.5        # d_clear (m)
+  min_path_length: 15.0 # l_pi_min (m); sampled start-goal pair is rejected
+                        # if the shortest path between them on the roadmap
+                        # is shorter than this, and resampled (paper §III-B.3).
+  speed_min: 1.0        # D_v*: constant v* = 1 m/s per Table I
+  speed_max: 1.0
+
+# --- Omega_obs: obstacle parameters (paper §III-B.4, §III-B.5) ---
+obstacles:
+  n_static: 4           # stratified across {0, 4, 8, 16}
+  n_dynamic: 2          # stratified across {0, 2, 4, 8}
+  radius_min: 0.1       # D_r lower bound (m)
+  radius_max: 0.4       # D_r upper bound (m)
+  shape_weights:        # paper restricts to circles and squares
+    circle: 1.0
+    square: 1.0
+  min_clearance: 0.3    # d_min (m)
+  path_clearance: 0.3   # clearance of initial obstacle position to pi; matches d_min
+  prm_samples: 300      # n_samples^obs
+  prm_neighbors: 10     # k_nn^obs
+  max_edge_length: 5.0  # l_max^obs (m)
+  trajectory_clearance: 0.5  # d_clear^obs (m)
+  dyn_speed_min: 0.2    # D_v^obs lower bound (m/s)
+  dyn_speed_max: 0.8    # D_v^obs upper bound (m/s)
+  max_place_attempts: 200
