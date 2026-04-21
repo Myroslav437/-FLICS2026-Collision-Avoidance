@@ -8,6 +8,7 @@ dist/
 build/
 .eggs/
 .pytest_cache/
+.claude/
 
 # Virtual environment
 .venv/
