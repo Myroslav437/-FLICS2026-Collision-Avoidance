@@ -135,7 +135,9 @@ def animate(
             fig.canvas.mpl_connect("key_press_event", _on_key)
             plt.show()
         else:
-            anim = animation.FuncAnimation(
+            # Keep a reference at module level so the GC doesn't collect it
+            # before plt.show() finishes rendering.
+            animate._anim = animation.FuncAnimation(
                 fig, _update, init_func=_init,
                 frames=total_steps, interval=interval_ms,
                 blit=False, repeat=False,

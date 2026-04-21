@@ -10,9 +10,13 @@ build/
 .pytest_cache/
 
 # Virtual environment
+.venv/
 venv/
 .env/
 env/
+ENV/
+env.bak/
+venv.bak/
 
 # IDE
 .vscode/

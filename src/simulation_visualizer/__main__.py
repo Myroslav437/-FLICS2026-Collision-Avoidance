@@ -28,6 +28,17 @@ if _PROJECT_ROOT not in sys.path:
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
+import matplotlib as _mpl  # noqa: E402
+
+_NON_INTERACTIVE = {"agg", "cairo", "pdf", "pgf", "ps", "svg", "template"}
+if _mpl.get_backend().lower() in _NON_INTERACTIVE:
+    for _b in ("qt5agg", "tkagg", "gtk4agg", "gtk3agg", "wxagg"):
+        try:
+            _mpl.use(_b)
+            break
+        except Exception:
+            pass
+
 from simulation_visualizer.playback import animate  # noqa: E402
 from simulation_visualizer.reader import TelemetryError, read_telemetry  # noqa: E402
 
