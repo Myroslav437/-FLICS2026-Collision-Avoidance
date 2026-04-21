@@ -26,10 +26,37 @@ For each sampled (v', omega') we integrate a short-horizon trajectory
     score = w_head * heading + w_clear * clearance + w_vel * velocity
 
 where:
-  - heading   = 1 - |angle to target at trajectory end| / pi
-  - clearance = min distance to any obstacle along the arc,
-                normalised by `max_range`; infeasible arcs
-                (collision at any sampled point) are discarded
+  - heading   = 1 - |angle between the arc-end heading and the bearing
+                from the robot's current position to a fixed look-ahead
+                anchor on the reference path| / pi. The anchor is the
+                point at arc-length v_agv_max * look_ahead along the
+                path from the AGV's projection onto it (clamped to the
+                final waypoint if the path ends sooner). Anchoring at
+                the maximum reach of the dynamic window guarantees no
+                feasible arc overshoots the anchor, so the heading term
+                is monotone in the arc-end heading's alignment with the
+                path direction. Bearing is computed from the current
+                position (not the arc end), keeping the term stable as
+                the AGV approaches the final goal.
+  - clearance serves only as a hard feasibility filter: any arc whose
+                integrated path drops inside the safety_radius buffer
+                of any predicted obstacle is discarded (no score is
+                assigned). The term's default scoring weight is zero
+                because any residual gradient among feasible arcs
+                (min-perpendicular-distance-to-obstacle, capped at
+                safety_radius) reintroduces the ratcheting stall seen
+                whenever an obstacle sits in the buffer band: the
+                arc-end proximity drops sub-linearly with v, so the
+                argmax sits one sample below v_prev and the AGV
+                decelerates to zero. With w_clearance = 0 and a
+                bumped w_velocity = 0.3, heading still dominates
+                tracking and velocity provides a strictly monotone
+                preference for forward motion among feasible arcs.
+                This matches the strict Fox "dist(v, omega)" semantics
+                under full-horizon saturation, where for feasible
+                arcs dist = v * look_ahead and c_score reduces to
+                v / v_max -- i.e., the clearance term is folded into
+                the velocity term.
   - velocity  = v' / v_max
 """
 
@@ -46,8 +73,6 @@ from ...types import AGVState, ControlAction, FusedObstacle
 from ..base import AvoidanceStage
 from ..registry import register_avoidance
 
-from ._goal_tracker import WaypointGoalTracker
-
 
 class DWAAvoidance(AvoidanceStage):
     """DWA avoidance (Fox, Burgard, Thrun)."""
@@ -61,10 +86,9 @@ class DWAAvoidance(AvoidanceStage):
         look_ahead: float = 1.5,
         integ_steps: int = 10,
         w_heading: float = 0.7,
-        w_clearance: float = 0.2,
-        w_velocity: float = 0.1,
+        w_clearance: float = 0.0,
+        w_velocity: float = 0.3,
         safety_radius: float = 0.5,
-        max_range: float = 5.0,
         goal_tolerance: float = 0.3,
     ) -> None:
         if n_v_samples < 2 or n_omega_samples < 3:
@@ -83,17 +107,14 @@ class DWAAvoidance(AvoidanceStage):
         self.w_clearance = float(w_clearance)
         self.w_velocity = float(w_velocity)
         self.safety_radius = float(safety_radius)
-        self.max_range = float(max_range)
         self.goal_tolerance = float(goal_tolerance)
 
-        self._tracker: Optional[WaypointGoalTracker] = None
         self._sigma: Optional[SimulationConfig] = None
         self._v_prev: float = 0.0
         self._omega_prev: float = 0.0
 
     def reset(self, sigma: SimulationConfig, seed: int) -> None:
         self._sigma = sigma
-        self._tracker = None
         self._v_prev = 0.0
         self._omega_prev = 0.0
 
@@ -105,12 +126,8 @@ class DWAAvoidance(AvoidanceStage):
         dt: float,
     ) -> ControlAction:
         assert self._sigma is not None, "DWAAvoidance.reset() not called"
-        if self._tracker is None:
-            self._tracker = WaypointGoalTracker(reference_path)
 
-        target = self._tracker.current_target(agv_state.position)
-        goal = self._tracker.goal
-
+        goal = reference_path.positions[-1]
         if np.linalg.norm(agv_state.position - goal) <= self.goal_tolerance:
             return ControlAction(linear_velocity=0.0, angular_velocity=0.0)
 
@@ -127,6 +144,28 @@ class DWAAvoidance(AvoidanceStage):
         vs = np.linspace(v_lo, v_hi, self.n_v_samples)
         ws = np.linspace(w_lo, w_hi, self.n_omega_samples)
 
+        # Longest arc any sample in the dynamic window can trace;
+        # used for the heading look-ahead anchor below.
+        reach = dyn.v_agv_max * self.look_ahead
+
+        # Anchor the heading term at a fixed point on the reference path
+        # that sits exactly at the longest arc reach ahead of the AGV's
+        # projection onto the path (clamped to the final waypoint if the
+        # path ends sooner). Because no feasible arc can overshoot this
+        # anchor, the bearing from the current position to the anchor is
+        # well-defined throughout the run -- including the final approach
+        # where a per-arc-end bearing would flip 180 deg on overshoot and
+        # stall the AGV just outside the goal tolerance.
+        lookahead = _path_lookahead(
+            agv_state.position, reference_path.positions, reach
+        )
+        desired_vec = lookahead - agv_state.position
+        desired_norm = float(np.linalg.norm(desired_vec))
+        if desired_norm < 1e-9:
+            desired_bearing = float(agv_state.heading)
+        else:
+            desired_bearing = float(np.arctan2(desired_vec[1], desired_vec[0]))
+
         best_score = -float("inf")
         best_v = 0.0
         best_w = 0.0
@@ -134,7 +173,7 @@ class DWAAvoidance(AvoidanceStage):
 
         for v in vs:
             for w in ws:
-                feasible, end_pos, end_heading, clearance = _simulate_arc(
+                feasible, end_pos, end_heading, _ = _simulate_arc(
                     agv_state.position,
                     agv_state.heading,
                     float(v),
@@ -147,16 +186,18 @@ class DWAAvoidance(AvoidanceStage):
                 if not feasible:
                     continue
 
-                to_target = target - end_pos
-                desired_angle = float(np.arctan2(to_target[1], to_target[0]))
-                heading_err = abs(_angle_wrap(desired_angle - end_heading))
+                heading_err = abs(_angle_wrap(desired_bearing - end_heading))
                 heading_score = 1.0 - heading_err / np.pi
-                clearance_score = min(1.0, clearance / self.max_range)
                 velocity_score = v / max(dyn.v_agv_max, 1e-6)
 
+                # Clearance is a feasibility filter only (see module
+                # docstring); when w_clearance = 0 it contributes
+                # nothing to scoring, and the multiply-by-zero short-
+                # circuits cleanly whether `_` is a finite margin or
+                # inf. Kept in the expression for parity with the
+                # paper's additive form.
                 score = (
                     self.w_heading * heading_score
-                    + self.w_clearance * clearance_score
                     + self.w_velocity * velocity_score
                 )
                 if score > best_score:
@@ -166,10 +207,9 @@ class DWAAvoidance(AvoidanceStage):
                     found_feasible = True
 
         if not found_feasible:
-            # Every sample collides -- emergency stop & rotate toward target
-            to_target = target - agv_state.position
-            desired_angle = float(np.arctan2(to_target[1], to_target[0]))
-            heading_err = _angle_wrap(desired_angle - agv_state.heading)
+            # Every sample collides -- emergency stop & rotate toward the
+            # look-ahead anchor.
+            heading_err = _angle_wrap(desired_bearing - agv_state.heading)
             omega = _saturate(heading_err / max(dt, 1e-3), dyn.omega_agv_max)
             action = ControlAction(linear_velocity=0.0, angular_velocity=float(omega))
             self._v_prev = 0.0
@@ -231,8 +271,84 @@ def _simulate_arc(
                 min_clearance = nearest
 
     if min_clearance == float("inf"):
-        min_clearance = safety_radius * 10.0  # nothing in the way
+        return True, pos, th, float("inf")
     return True, pos, th, float(min_clearance)
+
+
+def _path_lookahead(
+    position: np.ndarray,
+    waypoints: np.ndarray,
+    distance: float,
+) -> np.ndarray:
+    """
+    Return a look-ahead point at arc length `distance` past the closest
+    projection of `position` onto the polyline through `waypoints`.
+
+    The projection is computed per-segment; the segment minimising the
+    perpendicular distance to `position` wins. From that projection we
+    walk forward along the polyline accumulating segment lengths until
+    we have travelled `distance` metres, and return the point reached.
+    If the remaining path from the projection is shorter than
+    `distance`, we return the final waypoint (the goal).
+
+    `waypoints` must have shape (N, 2) with N >= 2. `distance` must be
+    non-negative.
+    """
+    n = waypoints.shape[0]
+    assert n >= 2, "path must have at least two waypoints"
+    assert distance >= 0.0, "lookahead distance must be non-negative"
+
+    best_i = 0
+    best_t = 0.0
+    best_d_sq = float("inf")
+    best_proj = waypoints[0]
+    for i in range(n - 1):
+        a = waypoints[i]
+        b = waypoints[i + 1]
+        ab = b - a
+        ab_sq = float(np.dot(ab, ab))
+        if ab_sq < 1e-12:
+            t = 0.0
+            proj = a
+        else:
+            t = float(np.dot(position - a, ab) / ab_sq)
+            t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+            proj = a + t * ab
+        delta = position - proj
+        d_sq = float(np.dot(delta, delta))
+        if d_sq < best_d_sq:
+            best_d_sq = d_sq
+            best_i = i
+            best_t = t
+            best_proj = proj
+
+    remaining = distance
+    a = waypoints[best_i]
+    b = waypoints[best_i + 1]
+    seg_vec = b - a
+    seg_len = float(np.linalg.norm(seg_vec))
+    dist_to_next = seg_len * (1.0 - best_t)
+
+    if dist_to_next >= remaining:
+        if seg_len < 1e-12:
+            return np.asarray(b, dtype=float).copy()
+        return np.asarray(best_proj + (remaining / seg_len) * seg_vec, dtype=float)
+
+    remaining -= dist_to_next
+    i = best_i + 1
+    while i < n - 1:
+        a = waypoints[i]
+        b = waypoints[i + 1]
+        seg_vec = b - a
+        seg_len = float(np.linalg.norm(seg_vec))
+        if seg_len >= remaining:
+            if seg_len < 1e-12:
+                return np.asarray(b, dtype=float).copy()
+            return np.asarray(a + (remaining / seg_len) * seg_vec, dtype=float)
+        remaining -= seg_len
+        i += 1
+
+    return np.asarray(waypoints[-1], dtype=float).copy()
 
 
 def _angle_wrap(a: float) -> float:

@@ -21,6 +21,7 @@ import hashlib
 import itertools
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -88,18 +89,24 @@ class Job:
         return os.path.join(self.output_dir, "telemetry", base + ".jsonl")
 
 
+_WORLD_FILE_RE = re.compile(r"^world_\d+\.json$")
+
+
 def _iter_world_files(corpus_dir: str) -> List[Tuple[str, int]]:
     """
     Return a sorted list of (world_path, world_id) from a corpus directory.
+
+    Only files matching ``world_NNNNN.json`` are returned; auxiliary
+    artefacts such as ``world_00038_hist.jsonl`` or
+    ``world_00038_hist.report.json`` that a prior telemetry/replay pass
+    may have dropped into the corpus directory are ignored.
 
     `world_id` is read from the world JSON itself so it matches whatever
     the generator assigned, regardless of filename.
     """
     world_paths = []
     for name in sorted(os.listdir(corpus_dir)):
-        if not name.endswith(".json"):
-            continue
-        if not name.startswith("world_"):
+        if not _WORLD_FILE_RE.match(name):
             continue
         full = os.path.join(corpus_dir, name)
         with open(full, "r", encoding="utf-8") as f:
@@ -107,7 +114,7 @@ def _iter_world_files(corpus_dir: str) -> List[Tuple[str, int]]:
         world_paths.append((full, int(data["world_id"])))
     if not world_paths:
         raise FileNotFoundError(
-            f"No world_*.json files found in {corpus_dir}"
+            f"No world_NNNNN.json files found in {corpus_dir}"
         )
     return world_paths
 

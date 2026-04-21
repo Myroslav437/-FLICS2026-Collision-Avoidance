@@ -1,0 +1,3 @@
+environment.bsp_depth: [1, 2]
+obstacles.n_static: [4, 16]
+obstacles.n_dynamic: [2, 8]
