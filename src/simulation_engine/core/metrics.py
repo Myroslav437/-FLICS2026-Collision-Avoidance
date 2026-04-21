@@ -14,10 +14,15 @@ mu_dev  : mean perpendicular distance from the AGV position to the
 mu_goal : 1 iff the AGV reached w_n within T_horizon, else 0.
 mu_vel  : RMSE between fused and ground-truth velocities across the
           dynamic obstacles and all steps (m/s). NaN if the run has no
-          dynamic obstacles. Each fused obstacle is matched to its
-          nearest dynamic obstacle at each step (Euclidean).
+          dynamic obstacles. Association is performed from each dynamic
+          obstacle to its nearest fused track within a spatial gate (see
+          `record_velocity_samples`).
 mu_comp : mean per-step CPU wall time (s).
-mu_lat  : 95th-percentile per-step CPU wall time (s).
+mu_lat  : 95th-percentile per-step pipeline decision time (s), where
+          decision time is the sum of the three pipeline stage calls
+          (detection + fusion + avoidance) only — excluding perception,
+          dynamics, collision checks, and bookkeeping. See
+          `record_step_time` below.
 """
 
 from __future__ import annotations
@@ -54,6 +59,7 @@ class MetricsAccumulator:
         self._vel_sq_err_sum: float = 0.0
         self._vel_sample_count: int = 0
         self._step_times: List[float] = []
+        self._decision_times: List[float] = []
         self._collided: bool = False
         self._collision_step: Optional[int] = None
         self._goal_reached: bool = False
@@ -75,24 +81,80 @@ class MetricsAccumulator:
         dyn_velocities: np.ndarray,
     ) -> None:
         """
-        Accumulate squared velocity error across nearest-neighbour matched
-        (fused, ground-truth-dynamic) pairs at the current step.
+        Accumulate squared velocity error per dynamic obstacle for the
+        current step, per §IV-B mu_vel (RMSE averaged over dynamic
+        obstacles and simulation steps).
 
-        Static obstacles are excluded by construction: the engine supplies
-        only the dynamic obstacles' centroids and velocities.
+        Association direction: for each dynamic obstacle, find its
+        nearest fused track inside a spatial gate. Static obstacles and
+        spurious fused tracks never contribute (iteration is driven by
+        the dynamic-obstacle ground truth, not by the fused track list).
+
+        Implementation-internal choices (the paper does not specify):
+
+        * Gate size. Set to ``_GATE_FACTOR * max_fused_radius`` with a
+          floor of ``_GATE_FLOOR`` metres, derived from the fused
+          tracks' own radius estimate rather than introducing a new
+          paper parameter. Any dynamic obstacle whose nearest fused
+          track lies outside the gate is treated as "unmatched".
+        * Unmatched handling. An unmatched dynamic obstacle is charged
+          a squared error equal to the ground-truth velocity magnitude
+          squared --- equivalent to assuming the fusion stage reported
+          a zero-velocity (stationary) estimate. This makes the
+          denominator exactly ``n_dynamic * n_steps`` and prevents a
+          pipeline from lowering its mu_vel simply by failing to
+          produce tracks.
+
+        Both choices are flagged as "assumptions made" in the fix
+        report.
         """
-        if dyn_centroids.shape[0] == 0 or not fused:
+        if dyn_centroids.shape[0] == 0:
             return
-        for obs in fused:
-            diff = dyn_centroids - obs.position
-            d = np.linalg.norm(diff, axis=1)
-            j = int(np.argmin(d))
-            err = obs.velocity - dyn_velocities[j]
-            self._vel_sq_err_sum += float(err[0] ** 2 + err[1] ** 2)
+
+        _GATE_FACTOR = 3.0
+        _GATE_FLOOR = 1.0
+        if fused:
+            max_radius = max(float(f.radius) for f in fused)
+            gate = max(_GATE_FACTOR * max_radius, _GATE_FLOOR)
+            fused_positions = np.asarray(
+                [f.position for f in fused], dtype=float
+            )
+            fused_velocities = np.asarray(
+                [f.velocity for f in fused], dtype=float
+            )
+        else:
+            gate = _GATE_FLOOR
+            fused_positions = np.empty((0, 2), dtype=float)
+            fused_velocities = np.empty((0, 2), dtype=float)
+
+        for i in range(dyn_centroids.shape[0]):
+            v_gt = dyn_velocities[i]
+            if fused_positions.shape[0] == 0:
+                sq_err = float(v_gt[0] ** 2 + v_gt[1] ** 2)
+            else:
+                diff = fused_positions - dyn_centroids[i]
+                d = np.linalg.norm(diff, axis=1)
+                j = int(np.argmin(d))
+                if d[j] > gate:
+                    sq_err = float(v_gt[0] ** 2 + v_gt[1] ** 2)
+                else:
+                    err = fused_velocities[j] - v_gt
+                    sq_err = float(err[0] ** 2 + err[1] ** 2)
+            self._vel_sq_err_sum += sq_err
             self._vel_sample_count += 1
 
-    def record_step_time(self, wall_time: float) -> None:
+    def record_step_time(
+        self, wall_time: float, decision_time: float
+    ) -> None:
+        """
+        Record both the full-step wall time (for mu_comp) and the
+        pipeline-only decision time (for mu_lat). Per §IV-B, mu_lat is
+        the 95th-percentile "decision time" — the sum of the three
+        pipeline stage calls only — while mu_comp aggregates the full
+        per-step CPU cost.
+        """
         self._step_times.append(float(wall_time))
+        self._decision_times.append(float(decision_time))
 
     def record_collision(self, step: int) -> None:
         if not self._collided:
@@ -113,11 +175,16 @@ class MetricsAccumulator:
         else:
             mu_vel = float("nan")
         if self._step_times:
-            arr = np.asarray(self._step_times, dtype=float)
-            mu_comp = float(arr.mean())
-            mu_lat = float(np.percentile(arr, 95.0))
+            mu_comp = float(np.asarray(self._step_times, dtype=float).mean())
         else:
             mu_comp = 0.0
+        if self._decision_times:
+            mu_lat = float(
+                np.percentile(
+                    np.asarray(self._decision_times, dtype=float), 95.0
+                )
+            )
+        else:
             mu_lat = 0.0
         return RunMetrics(
             mu_col=int(self._collided),

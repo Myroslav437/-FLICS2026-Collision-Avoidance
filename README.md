@@ -41,7 +41,7 @@ src/
       fusion/               #   PT, KF
       avoidance/            #   VFH, DWA
       registry.py           # Name -> factory registry for all three
-    core/                   # Main loop, metrics aggregator, telemetry sink
+    core/                   # Main loop, metrics aggregator, telemetry sink, report generator
   simulation_visualizer/    # Post-hoc telemetry playback
     reader.py               # JSONL telemetry parser
     panels/                 # One module per visualization panel
@@ -57,6 +57,9 @@ src/
 scripts/
   generate_worlds.py        # CLI: build a flat or stratified corpus
   visualize_world.py        # CLI: render a saved world to PNG
+  run_simulation.py         # CLI: run a single simulation iteration
+  run_benchmark.py          # CLI: parallel benchmarking runner
+  analyze_results.py        # CLI: analysis pipeline for run reports
 tests/                      # pytest suite
 ```
 
@@ -189,6 +192,7 @@ obstacle counts, path length, generation time).
     --world data/validation_v5/world_00000.json \
     --config config/simulation_nominal.yaml \
     --detection EC --fusion PT --avoidance VFH \
+    --report data/run_report.json \
     --telemetry data/run_example.jsonl
 ```
 
@@ -197,6 +201,15 @@ Available stage names (all combinations supported):
 - **Detection:** `EC` (Euclidean clustering), `DB` (DBSCAN)
 - **Fusion:** `PT` (pass-through), `KF` (Kalman filter + Hungarian tracker)
 - **Avoidance:** `VFH` (Vector Field Histogram), `DWA` (Dynamic Window)
+
+### Run Reports
+
+Every simulation run automatically generates a structured JSON report containing final metrics, configuration metadata, and wall-clock execution time.
+
+**Output Path Logic:**
+1. If `--report` is specified, it uses that path.
+2. If `--report` is omitted but `--telemetry` is provided, the report is saved as `<telemetry_basename>.report.json`.
+3. If both are omitted, the report is saved next to the world file with a name encoding the pipeline configuration: `<world_prefix>.<det>.<fus>.<avd>.<sigma>.<seed>.report.json`.
 
 ### Simulation Configuration (`--config`)
 

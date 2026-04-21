@@ -209,18 +209,31 @@ class SimulationEngine:
                 rng=rng,
             )
 
-            # 2. A(W_tilde_t) — pipeline.
+            # 2. A(W_tilde_t) — pipeline. Per §IV-B, mu_lat is the 95th
+            # percentile of the three-stage "decision time" — the sum of
+            # the detection, fusion, and avoidance calls — and must not
+            # include perception, dynamics, collision checks, or any
+            # other per-step bookkeeping.
+            t_det_start = time.perf_counter()
             detections = detector.step(
                 scan=perceived.lidar_scan,
                 prior_map=prior_map,
                 agv_state=agv_state,
             )
+            t_fus_start = time.perf_counter()
             fused: List[FusedObstacle] = fuser.step(detections, dt)
+            t_avoid_start = time.perf_counter()
             control = avoider.step(
                 fused_obstacles=fused,
                 reference_path=world.reference_path,
                 agv_state=agv_state,
                 dt=dt,
+            )
+            t_avoid_end = time.perf_counter()
+            decision_time = (
+                (t_fus_start - t_det_start)
+                + (t_avoid_start - t_fus_start)
+                + (t_avoid_end - t_avoid_start)
             )
 
             # Record mu_vel samples before stepping the world so we score
@@ -254,7 +267,7 @@ class SimulationEngine:
             # 5. Per-step bookkeeping.
             metrics.record_deviation(agv_state.position)
             step_wall = time.perf_counter() - t_step_start
-            metrics.record_step_time(step_wall)
+            metrics.record_step_time(step_wall, decision_time)
 
             # Telemetry (post-step state — what the visualizer should draw).
             if world.obstacles:

@@ -219,39 +219,87 @@ def largest_connected_component(
     return points[ids], ids
 
 
-def sample_terminals_on_roadmap(
-    cc_points: np.ndarray,
+def sample_terminals_in_free_space(
+    inflated_free: BaseGeometry,
+    graph: nx.Graph,
+    points: np.ndarray,
+    node_ids: np.ndarray,
+    k_nn: int,
+    l_max: float,
     rng: np.random.Generator,
     min_separation: float,
     max_attempts: int = 500,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, int, int]:
     """
-    Pick start and goal positions from the largest-connected-component nodes
-    of the roadmap.
+    Implement §III-B.3 steps (4)-(5): sample start and goal uniformly in
+    the inflated free space, then insert each into the roadmap and
+    connect it to its k_nn nearest existing nodes via collision-free
+    straight-line edges (subject to the same l_max cap used during
+    roadmap construction).
 
-    Using existing roadmap nodes guarantees both points are reachable from
-    each other (they already belong to the same connected subgraph), which
-    removes the arbitrary-rejection failure mode of sampling independent
-    points and hoping they land near the roadmap.
+    `points` / `node_ids` describe the candidate roadmap nodes that
+    terminals are connected to (typically the largest connected
+    component of the roadmap, so successful insertion guarantees a
+    Dijkstra-feasible start/goal pair).
 
-    `min_separation` enforces a minimum Euclidean distance between start and
-    goal so the planner does not produce a trivial degenerate path.
+    Returns (start, goal, start_id, goal_id). The two terminal nodes
+    are added to `graph` in place; callers are responsible for removing
+    them if they wish to retry on a different pair (e.g. l_pi_min
+    rejection).
+
+    `min_separation` rejects start/goal pairs that are closer than the
+    threshold in Euclidean distance, avoiding trivial degenerate paths;
+    the binding path-length filter (l_pi_min) is applied separately on
+    the post-Dijkstra route.
+
+    Raises PRMGenerationError if, after `max_attempts` resamples, no
+    pair of free-space points could both be connected to the roadmap
+    within l_max via a collision-free edge.
     """
-    n = cc_points.shape[0]
-    if n < 2:
+    if inflated_free.is_empty:
         raise PRMGenerationError(
-            "Roadmap largest component has fewer than 2 nodes; "
-            "cannot sample start/goal"
+            "Inflated free space is empty; cannot sample terminals"
         )
+    if points.shape[0] == 0:
+        raise PRMGenerationError(
+            "Roadmap has no candidate nodes; cannot connect terminals"
+        )
+    prepared_region = prep(inflated_free)
+    # Use node ids disjoint from the roadmap's 0..n_nodes-1 range so
+    # insertion never collides with an existing sample's id. Callers
+    # that build a wider graph must not assume these specific values
+    # beyond "not previously present."
+    start_id = int(graph.number_of_nodes()) + 1_000_000
+    goal_id = start_id + 1
+
     for _ in range(max_attempts):
-        i, j = rng.choice(n, size=2, replace=False)
-        a = cc_points[int(i)]
-        b = cc_points[int(j)]
-        if np.linalg.norm(b - a) >= min_separation:
-            return a.copy(), b.copy()
+        start = sample_point_in(inflated_free, rng)
+        goal = sample_point_in(inflated_free, rng)
+        if np.linalg.norm(goal - start) < min_separation:
+            continue
+        try:
+            insert_terminal(
+                graph, points, node_ids, start, k_nn, l_max,
+                prepared_region, start_id,
+            )
+        except PRMGenerationError:
+            if graph.has_node(start_id):
+                graph.remove_node(start_id)
+            continue
+        try:
+            insert_terminal(
+                graph, points, node_ids, goal, k_nn, l_max,
+                prepared_region, goal_id,
+            )
+        except PRMGenerationError:
+            graph.remove_node(start_id)
+            continue
+        return start.copy(), goal.copy(), start_id, goal_id
+
     raise PRMGenerationError(
-        f"Failed to sample start/goal with min_separation={min_separation} "
-        f"after {max_attempts} attempts"
+        f"Failed to sample a free-space start/goal pair that could both be "
+        f"connected to the roadmap within l_max={l_max} after "
+        f"{max_attempts} attempts (min_separation={min_separation})"
     )
 
 
@@ -315,25 +363,35 @@ def plan_random_path(
     rng: np.random.Generator,
 ) -> WaypointPath:
     """
-    End-to-end PRM planning with start and goal sampled from the
-    roadmap's largest connected component. Used for dynamic-obstacle
-    trajectories xi_i (Omega_obs); the reference path pi (Omega_path)
-    goes through ``plan_reference_path`` to enforce l_pi_min.
+    End-to-end PRM planning following §III-B.3 steps (4)-(5): start and
+    goal are sampled uniformly in the inflated free space and inserted
+    into the roadmap with kNN connections, then the shortest path is
+    found via Dijkstra.
+
+    Used for dynamic-obstacle trajectories xi_i (Omega_obs); the
+    reference path pi (Omega_path) goes through ``plan_reference_path``
+    to enforce l_pi_min.
     """
     graph, points = build_roadmap(
         inflated_free, n_samples=n_samples, k_nn=k_nn, l_max=l_max, rng=rng,
     )
-    cc_points, _ = largest_connected_component(graph, points)
-    start, goal = sample_terminals_on_roadmap(cc_points, rng, min_separation)
-    return _finish_plan(
-        graph=graph,
-        points=points,
+    cc_points, cc_ids = largest_connected_component(graph, points)
+    if cc_points.shape[0] == 0:
+        raise PRMGenerationError("Roadmap has no connected nodes")
+    _, _, start_id, goal_id = sample_terminals_in_free_space(
         inflated_free=inflated_free,
-        start=start,
-        goal=goal,
-        n_samples=n_samples,
+        graph=graph,
+        points=cc_points,
+        node_ids=cc_ids,
         k_nn=k_nn,
         l_max=l_max,
+        rng=rng,
+        min_separation=min_separation,
+    )
+    return _finish_plan_with_terminals(
+        graph=graph,
+        start_id=start_id,
+        goal_id=goal_id,
         speed_min=speed_min,
         speed_max=speed_max,
         rng=rng,
@@ -363,18 +421,14 @@ def plan_reference_path(
     resampled until the Dijkstra shortest path between them has total
     length >= ``min_path_length`` (l_pi_min).
 
-    Differs from ``plan_random_path`` in two ways:
-      1. Terminals are drawn as two distinct nodes of the roadmap's
-         largest connected component without an up-front Euclidean
-         minimum-separation check; the binding filter is the
-         post-Dijkstra path length, not the start-goal straight-line
-         distance.
-      2. On each attempt the pair is inserted, the shortest path is
-         computed, and if its total length is below ``min_path_length``
-         the terminals are removed and a new pair is drawn. The cap on
-         the number of attempts is implementation-internal; exhausting
-         it raises PRMGenerationError rather than silently falling back
-         to a shorter path.
+    Implements §III-B.3 steps (4)-(5): each attempt samples start and
+    goal uniformly in the inflated free space, inserts them into the
+    roadmap with kNN connections (via
+    ``sample_terminals_in_free_space``), runs Dijkstra, and accepts the
+    pair iff the resulting shortest-path length meets l_pi_min. The
+    cap on attempts is implementation-internal; exhausting it raises
+    PRMGenerationError rather than silently falling back to a shorter
+    path.
 
     Returns (path, n_attempts) where ``n_attempts`` is the number of
     start-goal pairs sampled before one satisfied l_pi_min (1 on the
@@ -392,20 +446,21 @@ def plan_reference_path(
             "Roadmap largest component has fewer than 2 nodes; "
             "cannot sample start/goal"
         )
-    prepared = prep(inflated_free)
-    start_id = n_samples
-    goal_id = n_samples + 1
 
     for attempt in range(1, _REFERENCE_PATH_MAX_ATTEMPTS + 1):
-        i, j = rng.choice(cc_points.shape[0], size=2, replace=False)
-        start = cc_points[int(i)].copy()
-        goal = cc_points[int(j)].copy()
-
-        insert_terminal(
-            graph, cc_points, cc_ids, start, k_nn, l_max, prepared, start_id
-        )
-        insert_terminal(
-            graph, cc_points, cc_ids, goal, k_nn, l_max, prepared, goal_id
+        _, _, start_id, goal_id = sample_terminals_in_free_space(
+            inflated_free=inflated_free,
+            graph=graph,
+            points=cc_points,
+            node_ids=cc_ids,
+            k_nn=k_nn,
+            l_max=l_max,
+            rng=rng,
+            # l_pi_min is the binding path-length filter; the up-front
+            # Euclidean separation check is disabled here (0.0) so that
+            # we do not double-reject short straight-line pairs that
+            # might still yield a sufficiently long Dijkstra route.
+            min_separation=0.0,
         )
 
         try:
@@ -471,7 +526,32 @@ def _finish_plan(
     goal_id = n_samples + 1
     insert_terminal(graph, cc_points, cc_ids, start, k_nn, l_max, prepared, start_id)
     insert_terminal(graph, cc_points, cc_ids, goal, k_nn, l_max, prepared, goal_id)
+    return _finish_plan_with_terminals(
+        graph=graph,
+        start_id=start_id,
+        goal_id=goal_id,
+        speed_min=speed_min,
+        speed_max=speed_max,
+        rng=rng,
+    )
 
+
+def _finish_plan_with_terminals(
+    graph: nx.Graph,
+    start_id: int,
+    goal_id: int,
+    speed_min: float,
+    speed_max: float,
+    rng: np.random.Generator,
+) -> WaypointPath:
+    """
+    Run Dijkstra on a roadmap whose `start_id` and `goal_id` terminals
+    are already inserted, simplify collinear waypoints, and assign
+    segment speeds.
+
+    Raises PRMGenerationError if no path connects the terminals or the
+    simplified path degenerates to zero segments.
+    """
     try:
         node_path = nx.shortest_path(
             graph, source=start_id, target=goal_id, weight="weight"
