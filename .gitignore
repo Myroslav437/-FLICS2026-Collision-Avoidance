@@ -30,7 +30,7 @@ data/
 *.jsonl
 
 # Manuscript sources (tracked separately)
-paper/
+#paper/
 
 # OS
 .DS_Store
