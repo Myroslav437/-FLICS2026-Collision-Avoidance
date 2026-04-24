@@ -5,7 +5,7 @@ collision-avoidance pipelines for Automated Guided Vehicles (AGVs) equipped
 with LiDAR sensors.
 
 > **Publication:** The results obtained with this framework are being prepared
-> for publication at _(conference TBD)_. A link to the published paper will be
+> for publication at _The 2026 international workshop on AI-Driven Industry 5.0: Empowering Human-Centric Manufacturing (AIDI 2026) Co-located with the 2nd International Conference on Federated Learning and Intelligent Computing Systems (FLICS2026)_. A link to the published paper will be
 > added here once available.
 
 The framework consists of three decoupled components:
@@ -357,7 +357,3 @@ You can now pass your custom string identifier natively through the simulation t
     --detection MY-DET --fusion PT --avoidance VFH \
     --telemetry my_custom_test.jsonl
 ```
-
-## Authors
-
-- (add authors)

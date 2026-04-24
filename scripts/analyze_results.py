@@ -105,6 +105,13 @@ def load_reports(reports_dir: str) -> pd.DataFrame:
         }
         for m in METRICS:
             row[m] = rep["metrics"][m]
+        execu = rep.get("execution", {}) or {}
+        row["collision_step"] = execu.get("collision_step")
+        row["goal_reach_step"] = execu.get("goal_reach_step")
+        # Timeout: neither collided nor reached goal within T_horizon.
+        row["timeout"] = int(
+            row["collision_step"] is None and row["goal_reach_step"] is None
+        )
         rows.append(row)
     if not rows:
         raise FileNotFoundError(f"No reports found in {reports_dir}")
@@ -252,49 +259,78 @@ def rq1_figure_difficulty(df_nominal: pd.DataFrame, path: str) -> None:
 # RQ2
 # =============================================================================
 
+def _paired_delta(
+    df: pd.DataFrame,
+    stage_col: str,
+    a0: str,
+    a1: str,
+    other_cols: Tuple[str, ...],
+    metrics: Tuple[str, ...],
+    filter_kwargs: Optional[dict] = None,
+) -> dict:
+    """
+    Compute paired metric deltas when switching `stage_col` from `a0` to `a1`,
+    holding `other_cols` fixed. Returns a dict with median delta, Wilcoxon
+    p-value, and pair count per metric.
+    """
+    sub = df
+    if filter_kwargs:
+        for k, v in filter_kwargs.items():
+            sub = sub[sub[k] == v]
+    piv = sub.pivot_table(
+        index=["world_id", *other_cols],
+        columns=stage_col,
+        values=list(metrics),
+        aggfunc="mean",
+    )
+    row: Dict[str, Optional[float]] = {}
+    for m in metrics:
+        if (m, a0) not in piv.columns or (m, a1) not in piv.columns:
+            row[f"median_delta_{m}"] = None
+            row[f"wilcoxon_p_{m}"] = None
+            row[f"n_pairs_{m}"] = 0
+            continue
+        paired = piv[m].dropna(subset=[a0, a1])
+        delta = (paired[a1] - paired[a0]).to_numpy()
+        # Mean paired difference is more informative than median for binary
+        # metrics (mu_col, mu_goal) where the median is usually zero.
+        row[f"median_delta_{m}"] = float(np.mean(delta)) if delta.size else None
+        row[f"n_pairs_{m}"] = int(delta.size)
+        if delta.size == 0 or np.all(delta == 0):
+            row[f"wilcoxon_p_{m}"] = None
+        else:
+            try:
+                w = stats.wilcoxon(delta, zero_method="wilcox")
+                row[f"wilcoxon_p_{m}"] = float(w.pvalue)
+            except ValueError:
+                row[f"wilcoxon_p_{m}"] = None
+    return row
+
+
 def rq2_table(df_nominal: pd.DataFrame) -> pd.DataFrame:
     """
-    Per-stage paired differences under Nominal.
-
-    For each stage s with two algorithm choices (a0, a1), pair every
-    (world, other-two-fixed) combination where both algorithms produced
-    a run and compute delta = metric[a1] - metric[a0]. Report the median
-    delta and the paired Wilcoxon signed-rank test p-value per metric.
+    Per-stage paired differences under Nominal, with Fusion sliced by
+    avoidance to test property (ii).
     """
-    stages = [
-        ("Detection (EC->DB)", "detection", "EC",  "DB", ("fusion", "avoidance")),
-        ("Fusion (PT->KF)",    "fusion",    "PT",  "KF", ("detection", "avoidance")),
-        ("Avoidance (VFH->DWA)", "avoidance", "VFH", "DWA", ("detection", "fusion")),
+    metrics = ("mu_col", "mu_vel", "mu_dev", "mu_goal")
+    specs: List[Tuple[str, str, str, str, Tuple[str, ...], Optional[dict]]] = [
+        ("Detection (EC->DB)", "detection", "EC",  "DB",
+         ("fusion", "avoidance"), None),
+        ("Fusion (PT->KF)", "fusion", "PT", "KF",
+         ("detection", "avoidance"), None),
+        ("Fusion (PT->KF) | Avoidance=VFH", "fusion", "PT", "KF",
+         ("detection",), {"avoidance": "VFH"}),
+        ("Fusion (PT->KF) | Avoidance=DWA", "fusion", "PT", "KF",
+         ("detection",), {"avoidance": "DWA"}),
+        ("Avoidance (VFH->DWA)", "avoidance", "VFH", "DWA",
+         ("detection", "fusion"), None),
     ]
-    metrics = ["mu_col", "mu_vel", "mu_dev", "mu_goal"]
     rows: List[dict] = []
-    for label, stage_col, a0, a1, other_cols in stages:
-        piv = df_nominal.pivot_table(
-            index=["world_id", *other_cols],
-            columns=stage_col,
-            values=metrics,
-            aggfunc="mean",
-        )
+    for label, stage_col, a0, a1, other_cols, filt in specs:
         row = {"stage": label}
-        for m in metrics:
-            if (m, a0) not in piv.columns or (m, a1) not in piv.columns:
-                row[f"median_delta_{m}"] = None
-                row[f"wilcoxon_p_{m}"] = None
-                row[f"n_pairs_{m}"] = 0
-                continue
-            paired = piv[m].dropna(subset=[a0, a1])
-            delta = (paired[a1] - paired[a0]).to_numpy()
-            row[f"median_delta_{m}"] = float(np.median(delta)) if delta.size else None
-            row[f"n_pairs_{m}"] = int(delta.size)
-            # Wilcoxon requires at least one nonzero difference
-            if delta.size == 0 or np.all(delta == 0):
-                row[f"wilcoxon_p_{m}"] = None
-            else:
-                try:
-                    w = stats.wilcoxon(delta, zero_method="wilcox")
-                    row[f"wilcoxon_p_{m}"] = float(w.pvalue)
-                except ValueError:
-                    row[f"wilcoxon_p_{m}"] = None
+        row.update(
+            _paired_delta(df_nominal, stage_col, a0, a1, other_cols, metrics, filt)
+        )
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -349,7 +385,7 @@ def rq3_tau_across_sigma(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def rq3_seed_stability(df_nominal: pd.DataFrame, n_shards: int = 5) -> dict:
+def rq3_seed_stability(df_nominal: pd.DataFrame, n_shards: int = 3) -> dict:
     """
     Partition Nominal runs into `n_shards` disjoint shards (by world_id),
     rank the 8 pipelines per shard, report per-metric mean pairwise
@@ -482,7 +518,10 @@ def render_summary(
     parts.append("\n\n## Table V -- RQ3 Pairwise Kendall's tau across sigma profiles\n")
     parts.append(_md_table(rq3_tau))
 
-    parts.append("\n\n**Seed-stability (5 disjoint shards of Nominal):**\n\n")
+    parts.append(
+        f"\n\n**Seed-stability ({rq3_seed.get('n_shards', '?')} "
+        f"disjoint shards of Nominal):**\n\n"
+    )
     seed_rows = [
         {"metric": m,
          "mean_tau": rq3_seed["per_metric"].get(m, {}).get("mean_tau"),
@@ -495,6 +534,255 @@ def render_summary(
         f"shard pairs): {_fmt(rq3_seed['overall_mean_tau'])}\n"
     )
     return "".join(parts)
+
+
+# =============================================================================
+# Paper-value extraction (inline numbers used in paper.tex §V prose)
+# =============================================================================
+
+def compute_paper_values(
+    df: pd.DataFrame,
+    df_nominal: pd.DataFrame,
+    agg: pd.DataFrame,
+    rq1_stats: dict,
+    rq2_tab: pd.DataFrame,
+    rq3_tau: pd.DataFrame,
+    rq3_seed: dict,
+) -> dict:
+    """Produce every inline number needed to replace paper.tex placeholders."""
+    out: Dict[str, object] = {}
+
+    # ---- RQ1 in-line values ----
+    fsr_by_bsp = {
+        int(r["d_bsp"]): float(r["mean"])
+        for r in rq1_stats["free_space_by_d_bsp"]
+    }
+    out["rq1_fsr_d_bsp_1"] = fsr_by_bsp.get(1)
+    out["rq1_fsr_d_bsp_2"] = fsr_by_bsp.get(2)
+    out["rq1_fsr_d_bsp_3"] = fsr_by_bsp.get(3)
+    means_in_order = [fsr_by_bsp[k] for k in sorted(fsr_by_bsp)]
+    out["rq1_fsr_monotonic"] = all(
+        a > b for a, b in zip(means_in_order, means_in_order[1:])
+    )
+    out["rq1_min_passage_mean"] = rq1_stats["min_passage_width_mean"]
+    out["rq1_nav_safety_pct"] = rq1_stats["nav_safety_fraction"] * 100.0
+    out["rq1_nav_safety_gt_98"] = rq1_stats["nav_safety_fraction"] > 0.98
+
+    # Obstacle-count range for mu_col/mu_dev/mu_goal under Nominal.
+    if not df_nominal.empty:
+        # Combine by the maximum of obstacle counts on each axis for a
+        # simple headline range: compute per-(n_static, n_dynamic) means and
+        # take the min (lowest-difficulty) and max (highest-difficulty) cell.
+        g = df_nominal.groupby(["n_static", "n_dynamic"])[list(TRAVEL_METRICS)].mean()
+        tot_obs = g.index.get_level_values("n_static") + g.index.get_level_values("n_dynamic")
+        low_mask = tot_obs == tot_obs.min()  # 0 obstacles
+        high_mask = tot_obs == tot_obs.max()  # 16 + 8 = 24 obstacles
+        low_row = g[low_mask].mean()
+        high_row = g[high_mask].mean()
+        out["rq1_mu_col_low"] = float(low_row["mu_col"])
+        out["rq1_mu_col_high"] = float(high_row["mu_col"])
+        out["rq1_mu_dev_low"] = float(low_row["mu_dev"])
+        out["rq1_mu_dev_high"] = float(high_row["mu_dev"])
+        out["rq1_mu_goal_low"] = float(low_row["mu_goal"])
+        out["rq1_mu_goal_high"] = float(high_row["mu_goal"])
+    else:
+        for k in ("mu_col_low", "mu_col_high", "mu_dev_low", "mu_dev_high",
+                  "mu_goal_low", "mu_goal_high"):
+            out[f"rq1_{k}"] = None
+
+    # Spearman-sign check.
+    # Expected: mu_col, mu_dev rise with obstacle count (positive rho);
+    #           mu_goal falls (negative rho).
+    # ---- RQ2 in-line values ----
+    # Look up deltas from rq2_tab.
+    row_by_stage = {r["stage"]: r for r in rq2_tab.to_dict(orient="records")}
+
+    def _abs(stage: str, metric: str) -> Optional[float]:
+        v = row_by_stage.get(stage, {}).get(f"median_delta_{metric}")
+        return None if v is None else abs(float(v))
+
+    det = row_by_stage.get("Detection (EC->DB)", {})
+    fus = row_by_stage.get("Fusion (PT->KF)", {})
+    avd = row_by_stage.get("Avoidance (VFH->DWA)", {})
+
+    out["rq2_det_delta_col"] = det.get("median_delta_mu_col")
+    out["rq2_det_delta_vel"] = det.get("median_delta_mu_vel")
+    out["rq2_det_delta_dev"] = det.get("median_delta_mu_dev")
+    out["rq2_det_delta_goal"] = det.get("median_delta_mu_goal")
+    out["rq2_fus_delta_col"] = fus.get("median_delta_mu_col")
+    out["rq2_fus_delta_vel"] = fus.get("median_delta_mu_vel")
+    out["rq2_fus_delta_dev"] = fus.get("median_delta_mu_dev")
+    out["rq2_fus_delta_goal"] = fus.get("median_delta_mu_goal")
+    out["rq2_avd_delta_col"] = avd.get("median_delta_mu_col")
+    out["rq2_avd_delta_vel"] = avd.get("median_delta_mu_vel")
+    out["rq2_avd_delta_dev"] = avd.get("median_delta_mu_dev")
+    out["rq2_avd_delta_goal"] = avd.get("median_delta_mu_goal")
+
+    fus_vfh = row_by_stage.get("Fusion (PT->KF) | Avoidance=VFH", {})
+    fus_dwa = row_by_stage.get("Fusion (PT->KF) | Avoidance=DWA", {})
+    out["rq2_fus_vfh_delta_col"] = fus_vfh.get("median_delta_mu_col")
+    out["rq2_fus_vfh_delta_vel"] = fus_vfh.get("median_delta_mu_vel")
+    out["rq2_fus_vfh_delta_dev"] = fus_vfh.get("median_delta_mu_dev")
+    out["rq2_fus_vfh_delta_goal"] = fus_vfh.get("median_delta_mu_goal")
+    out["rq2_fus_dwa_delta_col"] = fus_dwa.get("median_delta_mu_col")
+    out["rq2_fus_dwa_delta_vel"] = fus_dwa.get("median_delta_mu_vel")
+    out["rq2_fus_dwa_delta_dev"] = fus_dwa.get("median_delta_mu_dev")
+    out["rq2_fus_dwa_delta_goal"] = fus_dwa.get("median_delta_mu_goal")
+
+    # Property (i): direct stage sensitivity.
+    #   - Detection: |delta mu_col| > |delta mu_dev| AND > |delta mu_goal|
+    #   - Fusion:    |delta mu_vel| > each of col/dev/goal
+    #   - Avoidance: |delta mu_dev| > |delta mu_col| and |delta mu_goal|
+    #                percent-effect > |delta mu_col|
+    def _cmp_gt(a, b):
+        if a is None or b is None:
+            return None
+        return float(a) > float(b)
+
+    p1_det = _cmp_gt(_abs("Detection (EC->DB)", "mu_col"),
+                     _abs("Detection (EC->DB)", "mu_dev"))
+    p1_det_goal = _cmp_gt(_abs("Detection (EC->DB)", "mu_col"),
+                          _abs("Detection (EC->DB)", "mu_goal"))
+    p1_fus_col = _cmp_gt(_abs("Fusion (PT->KF)", "mu_vel"),
+                         _abs("Fusion (PT->KF)", "mu_col"))
+    p1_fus_dev = _cmp_gt(_abs("Fusion (PT->KF)", "mu_vel"),
+                         _abs("Fusion (PT->KF)", "mu_dev"))
+    p1_avd = _cmp_gt(_abs("Avoidance (VFH->DWA)", "mu_dev"),
+                     _abs("Avoidance (VFH->DWA)", "mu_col"))
+    p1_avd_goal = _cmp_gt(abs(float(avd.get("median_delta_mu_goal") or 0.0)),
+                          _abs("Avoidance (VFH->DWA)", "mu_col") or 0.0)
+
+    checks_p1 = [p1_det, p1_det_goal, p1_fus_col, p1_fus_dev, p1_avd, p1_avd_goal]
+    n_pass = sum(1 for c in checks_p1 if c is True)
+    if n_pass == len(checks_p1):
+        out["rq2_property_i_verdict"] = "holds"
+    elif n_pass >= 3:
+        out["rq2_property_i_verdict"] = "partially holds"
+    else:
+        out["rq2_property_i_verdict"] = "does not hold"
+    out["rq2_property_i_checks"] = {
+        "det_col_dominates_dev": p1_det,
+        "det_col_dominates_goal": p1_det_goal,
+        "fus_vel_dominates_col": p1_fus_col,
+        "fus_vel_dominates_dev": p1_fus_dev,
+        "avd_dev_dominates_col": p1_avd,
+        "avd_goal_dominates_col": p1_avd_goal,
+    }
+
+    # Property (ii): DWA's fusion-switch effect on mu_goal exceeds VFH's.
+    vfh_goal = fus_vfh.get("median_delta_mu_goal")
+    dwa_goal = fus_dwa.get("median_delta_mu_goal")
+    if vfh_goal is None or dwa_goal is None:
+        p2_holds = None
+    else:
+        p2_holds = abs(float(dwa_goal)) > abs(float(vfh_goal))
+    out["rq2_property_ii_verdict"] = (
+        "holds" if p2_holds is True else
+        "does not hold" if p2_holds is False else
+        "inconclusive"
+    )
+
+    # ---- RQ3 values ----
+    out["rq3_seed_overall_mean_tau"] = rq3_seed.get("overall_mean_tau")
+    tau_per = rq3_seed.get("per_metric") or {}
+    # Focus on the four metrics the paper references:
+    per_travel = [
+        tau_per.get(m, {}).get("mean_tau")
+        for m in ("mu_col", "mu_dev", "mu_goal", "mu_vel")
+    ]
+    per_travel_valid = [v for v in per_travel if v is not None]
+    min_tau_travel = min(per_travel_valid) if per_travel_valid else None
+    out["rq3_seed_min_tau_travel"] = min_tau_travel
+
+    # Classification of seed robustness.
+    overall = rq3_seed.get("overall_mean_tau")
+    if overall is None:
+        out["rq3_seed_robustness"] = "inconclusive"
+    elif overall >= 0.7:
+        out["rq3_seed_robustness"] = "robust"
+    elif overall >= 0.4:
+        out["rq3_seed_robustness"] = "moderately robust"
+    else:
+        out["rq3_seed_robustness"] = "fragile"
+
+    # Cross-sigma stability: summarize tau across three pair columns for the
+    # four travel metrics (as in Table V).
+    tau_rows = rq3_tau.to_dict(orient="records")
+    tau_by_metric = {r["metric"]: r for r in tau_rows}
+    pair_cols = ("tau_nominal_vs_degraded-1",
+                 "tau_nominal_vs_degraded-2",
+                 "tau_degraded-1_vs_degraded-2")
+    all_taus: List[float] = []
+    per_metric_min: Dict[str, float] = {}
+    for m in ("mu_col", "mu_dev", "mu_goal", "mu_vel"):
+        vals = [tau_by_metric.get(m, {}).get(c) for c in pair_cols]
+        vals = [v for v in vals if v is not None]
+        if vals:
+            per_metric_min[m] = float(min(vals))
+            all_taus.extend(vals)
+    out["rq3_xsigma_min_tau"] = (
+        float(min(per_metric_min.values())) if per_metric_min else None
+    )
+    out["rq3_xsigma_mean_tau"] = (
+        float(np.mean(all_taus)) if all_taus else None
+    )
+    # Ranking stability classification: uniform if every tau in Table V >= 0.7.
+    out["rq3_xsigma_uniform"] = (
+        all(v >= 0.7 for v in all_taus) if all_taus else False
+    )
+
+    # ---- DWA timeout fractions per sigma ----
+    timeouts: Dict[str, object] = {}
+    for sig in SIGMA_PROFILES:
+        sub = df[(df["sigma"] == sig) & (df["avoidance"] == "DWA")]
+        if sub.empty:
+            timeouts[sig] = None
+        else:
+            timeouts[sig] = float(sub["timeout"].mean())
+    out["dwa_timeout_fraction"] = timeouts
+    # Also overall timeout fraction per avoidance.
+    overall_to: Dict[str, object] = {}
+    for avo in ("VFH", "DWA"):
+        sub = df[df["avoidance"] == avo]
+        overall_to[avo] = (
+            None if sub.empty else float(sub["timeout"].mean())
+        )
+    out["avoidance_timeout_fraction"] = overall_to
+
+    # ---- Nominal->Degraded-2 aggregate-worsening summary ----
+    agg_wide = agg.pivot(index="pipeline", columns="sigma", values=list(METRICS))
+    worsen: Dict[str, Dict[str, bool]] = {}
+    for pipe in agg_wide.index:
+        per_metric: Dict[str, bool] = {}
+        for metric in METRICS:
+            try:
+                n = float(agg_wide.loc[pipe, (metric, "nominal")])
+                d2 = float(agg_wide.loc[pipe, (metric, "degraded-2")])
+            except (KeyError, ValueError):
+                continue
+            if metric == "mu_goal":  # higher is better
+                per_metric[metric] = d2 < n
+            else:  # lower is better
+                per_metric[metric] = d2 > n
+        worsen[str(pipe)] = per_metric
+    out["degraded2_vs_nominal_worse"] = worsen
+
+    return out
+
+
+def _tex_num(x: Optional[float], nd: int = 3, pct: bool = False) -> str:
+    """Format a numeric value for inline substitution into paper.tex."""
+    if x is None:
+        return "--"
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return str(x)
+    if np.isnan(v):
+        return "--"
+    if pct:
+        return f"{v*100:.1f}"
+    return f"{v:.{nd}f}"
 
 
 # =============================================================================
@@ -576,7 +864,7 @@ def main() -> int:
     rq3_seed = (
         rq3_seed_stability(df_nominal)
         if not df_nominal.empty else
-        {"n_shards": 5, "per_metric": {}, "overall_mean_tau": None}
+        {"n_shards": 3, "per_metric": {}, "overall_mean_tau": None}
     )
 
     # Emit artifacts.
@@ -597,6 +885,19 @@ def main() -> int:
         f.write(summary)
     print(f"Wrote {md_path}")
 
+    paper_values = (
+        compute_paper_values(
+            df=df,
+            df_nominal=df_nominal,
+            agg=agg,
+            rq1_stats=rq1_stats,
+            rq2_tab=rq2_tab,
+            rq3_tau=rq3_tau,
+            rq3_seed=rq3_seed,
+        )
+        if not df_nominal.empty
+        else {}
+    )
     data = {
         "n_runs": len(df),
         "n_worlds": len(world_df),
@@ -606,6 +907,7 @@ def main() -> int:
         "rq2_table": rq2_tab.to_dict(orient="records"),
         "rq3_tau_across_sigma": rq3_tau.to_dict(orient="records"),
         "rq3_seed_stability": rq3_seed,
+        "paper_values": paper_values,
     }
     data_path = os.path.join(args.output, "analysis_data.json")
     with open(data_path, "w", encoding="utf-8") as f:
